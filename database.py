@@ -108,6 +108,24 @@ def find_by_phone(fragment: str, limit: int = 10):
     return rows
 
 
+def search(q: str = "", status: str = "", limit: int = 300):
+    """Ism, raqam yoki Telegram ID bo'yicha qidiradi; holat bo'yicha filtrlaydi."""
+    sql, params = "SELECT * FROM votes WHERE 1=1", []
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    q = (q or "").strip().replace(" ", "")
+    if q:
+        sql += " AND (full_name LIKE ? OR phone LIKE ? OR CAST(telegram_id AS TEXT) LIKE ?)"
+        params += [f"%{q}%"] * 3
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    conn = _conn()
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return rows
+
+
 def exists_for_phone(phone: str) -> bool:
     conn = _conn()
     row = conn.execute("SELECT 1 FROM votes WHERE phone = ? LIMIT 1", (phone,)).fetchone()
