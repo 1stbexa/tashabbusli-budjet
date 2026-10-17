@@ -165,9 +165,12 @@ def build_app(bot, secret: bytes, password: str) -> web.Application:
     app.router.add_get("/health", health)
     app.router.add_get("/login",  login_get)
     app.router.add_post("/auth",  login_post)
+    app.router.add_get("/auth",   lambda r: web.HTTPFound("/login"))  # GET /auth → login
     app.router.add_get("/logout", logout)
     app.router.add_get("/",       index)
     app.router.add_post("/action", action)
+    app.router.add_get("/action", lambda r: web.HTTPFound("/"))       # GET /action → home
     app.router.add_get("/export", export)
     app.router.add_post("/clear", clear_test)
+    app.router.add_get("/clear",  lambda r: web.HTTPFound("/"))       # GET /clear → home
     return app
