@@ -8,13 +8,15 @@ Holatlar: submitted (oddiy), review (tekshirish kerak), verified (admin tasdiqla
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, date
 
 DB_PATH = "votes.db"
 
 
 def _conn():
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_db():
@@ -47,140 +49,171 @@ def add_vote(telegram_id, full_name, phone, screenshot_file_id,
     conn = _conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO votes (telegram_id, full_name, phone, screenshot_file_id, status, "
-        "created_at, screenshot_unique_id, flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (telegram_id, full_name, phone, screenshot_file_id, status,
-         datetime.now().isoformat(), screenshot_unique_id, flags),
+        """INSERT INTO votes
+           (telegram_id, full_name, phone, screenshot_file_id,
+            status, created_at, screenshot_unique_id, flags)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (telegram_id, full_name, phone, screenshot_file_id,
+         status, datetime.utcnow().isoformat(), screenshot_unique_id, flags)
     )
     conn.commit()
-    vote_id = cur.lastrowid
+    row_id = cur.lastrowid
     conn.close()
-    return vote_id
+    return row_id
 
 
-def get_vote(vote_id: int):
+def get_by_id(row_id: int):
     conn = _conn()
-    row = conn.execute("SELECT * FROM votes WHERE id = ?", (vote_id,)).fetchone()
+    row = conn.execute("SELECT * FROM votes WHERE id=?", (row_id,)).fetchone()
     conn.close()
-    return row
+    return tuple(row) if row else None
 
 
-def set_status(vote_id: int, status: str):
+def set_status(row_id: int, status: str):
     conn = _conn()
-    conn.execute("UPDATE votes SET status = ? WHERE id = ?", (status, vote_id))
+    conn.execute("UPDATE votes SET status=? WHERE id=?", (status, row_id))
     conn.commit()
     conn.close()
 
 
-def get_all():
+def phone_exists(phone: str) -> bool:
     conn = _conn()
-    rows = conn.execute("SELECT * FROM votes ORDER BY created_at DESC").fetchall()
+    r = conn.execute(
+        "SELECT 1 FROM votes WHERE phone=? AND status!='rejected' LIMIT 1",
+        (phone,)
+    ).fetchone()
     conn.close()
-    return rows
+    return r is not None
 
 
-def get_recent(limit: int = 10):
-    conn = _conn()
-    rows = conn.execute("SELECT * FROM votes ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    conn.close()
-    return rows
-
-
-def get_by_status(status: str, limit: int = 10):
-    conn = _conn()
-    rows = conn.execute(
-        "SELECT * FROM votes WHERE status = ? ORDER BY id DESC LIMIT ?", (status, limit)
-    ).fetchall()
-    conn.close()
-    return rows
-
-
-def find_by_phone(fragment: str, limit: int = 10):
-    digits = "".join(ch for ch in fragment if ch.isdigit())
-    if not digits:
-        return []
-    conn = _conn()
-    rows = conn.execute(
-        "SELECT * FROM votes WHERE REPLACE(phone, '+', '') LIKE ? ORDER BY id DESC LIMIT ?",
-        (f"%{digits}%", limit),
-    ).fetchall()
-    conn.close()
-    return rows
-
-
-def search(q: str = "", status: str = "", limit: int = 300):
-    """Ism, raqam yoki Telegram ID bo'yicha qidiradi; holat bo'yicha filtrlaydi."""
-    sql, params = "SELECT * FROM votes WHERE 1=1", []
-    if status:
-        sql += " AND status = ?"
-        params.append(status)
-    q = (q or "").strip().replace(" ", "")
-    if q:
-        sql += " AND (full_name LIKE ? OR phone LIKE ? OR CAST(telegram_id AS TEXT) LIKE ?)"
-        params += [f"%{q}%"] * 3
-    sql += " ORDER BY id DESC LIMIT ?"
-    params.append(limit)
-    conn = _conn()
-    rows = conn.execute(sql, params).fetchall()
-    conn.close()
-    return rows
-
-
-def exists_for_phone(phone: str) -> bool:
-    conn = _conn()
-    row = conn.execute("SELECT 1 FROM votes WHERE phone = ? LIMIT 1", (phone,)).fetchone()
-    conn.close()
-    return row is not None
-
-
-def exists_screenshot(unique_id: str) -> bool:
+def unique_id_exists(unique_id: str) -> bool:
     if not unique_id:
         return False
     conn = _conn()
-    row = conn.execute(
-        "SELECT 1 FROM votes WHERE screenshot_unique_id = ? LIMIT 1", (unique_id,)
+    r = conn.execute(
+        "SELECT 1 FROM votes WHERE screenshot_unique_id=? AND status!='rejected' LIMIT 1",
+        (unique_id,)
     ).fetchone()
     conn.close()
-    return row is not None
+    return r is not None
 
 
-def count_for_user(telegram_id: int) -> int:
+def count_per_tg(telegram_id: int) -> int:
     conn = _conn()
-    n = conn.execute("SELECT COUNT(*) FROM votes WHERE telegram_id = ?", (telegram_id,)).fetchone()[0]
+    r = conn.execute(
+        "SELECT COUNT(*) FROM votes WHERE telegram_id=? AND status!='rejected'",
+        (telegram_id,)
+    ).fetchone()
     conn.close()
-    return n
+    return r[0] if r else 0
+
+
+# ── Statistika funksiyalari ──────────────────────────────────────────────────
+
+def count_total() -> int:
+    """Rad etilmaganlar soni."""
+    conn = _conn()
+    r = conn.execute(
+        "SELECT COUNT(*) FROM votes WHERE status != 'rejected'"
+    ).fetchone()
+    conn.close()
+    return r[0] if r else 0
+
+
+def count_today() -> int:
+    """Bugun qo'shilgan (rad etilmagan) yozuvlar soni."""
+    today = date.today().isoformat()
+    conn = _conn()
+    r = conn.execute(
+        "SELECT COUNT(*) FROM votes WHERE status != 'rejected' AND created_at LIKE ?",
+        (f"{today}%",)
+    ).fetchone()
+    conn.close()
+    return r[0] if r else 0
 
 
 def count_by_status(status: str) -> int:
     conn = _conn()
-    n = conn.execute("SELECT COUNT(*) FROM votes WHERE status = ?", (status,)).fetchone()[0]
+    r = conn.execute(
+        "SELECT COUNT(*) FROM votes WHERE status=?", (status,)
+    ).fetchone()
     conn.close()
-    return n
+    return r[0] if r else 0
 
 
-def count_total() -> int:
-    """Rad etilganlardan tashqari barcha yozuvlar."""
+def count_all(status_filter: str = None) -> int:
+    """Filter bilan jami yozuvlar soni."""
     conn = _conn()
-    n = conn.execute("SELECT COUNT(*) FROM votes WHERE status != 'rejected'").fetchone()[0]
+    if status_filter:
+        r = conn.execute(
+            "SELECT COUNT(*) FROM votes WHERE status=?", (status_filter,)
+        ).fetchone()
+    else:
+        r = conn.execute("SELECT COUNT(*) FROM votes").fetchone()
     conn.close()
-    return n
+    return r[0] if r else 0
 
 
-def count_today() -> int:
-    today = datetime.now().strftime("%Y-%m-%d")
+# ── Ma'lumot olish funksiyalari ──────────────────────────────────────────────
+
+def _rows_to_tuples(rows):
+    return [tuple(r) for r in rows]
+
+
+def get_recent(n: int = 10) -> list:
+    """Oxirgi n ta yozuv (rad etilmaganlar)."""
     conn = _conn()
-    n = conn.execute(
-        "SELECT COUNT(*) FROM votes WHERE created_at LIKE ? AND status != 'rejected'",
-        (today + "%",),
-    ).fetchone()[0]
+    rows = conn.execute(
+        "SELECT * FROM votes WHERE status != 'rejected' ORDER BY id DESC LIMIT ?",
+        (n,)
+    ).fetchall()
     conn.close()
-    return n
+    return _rows_to_tuples(rows)
 
 
-def clear_all() -> int:
+def get_by_status(status: str) -> list:
     conn = _conn()
-    n = conn.execute("SELECT COUNT(*) FROM votes").fetchone()[0]
-    conn.execute("DELETE FROM votes")
+    rows = conn.execute(
+        "SELECT * FROM votes WHERE status=? ORDER BY id DESC",
+        (status,)
+    ).fetchall()
+    conn.close()
+    return _rows_to_tuples(rows)
+
+
+def get_all(status_filter: str = None, limit: int = 30, offset: int = 0) -> list:
+    """Filter va pagination bilan barcha yozuvlar."""
+    conn = _conn()
+    if status_filter:
+        rows = conn.execute(
+            "SELECT * FROM votes WHERE status=? ORDER BY id DESC LIMIT ? OFFSET ?",
+            (status_filter, limit, offset)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM votes ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset)
+        ).fetchall()
+    conn.close()
+    return _rows_to_tuples(rows)
+
+
+def search_by_phone(query: str) -> list:
+    """Telefon raqami bo'yicha qidirish (qisman moslik)."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT * FROM votes WHERE phone LIKE ? ORDER BY id DESC LIMIT 50",
+        (f"%{query}%",)
+    ).fetchall()
+    conn.close()
+    return _rows_to_tuples(rows)
+
+
+# ── Boshqaruv ────────────────────────────────────────────────────────────────
+
+def delete_test_data():
+    """'test' belgisi bor yoki juda eski (development) yozuvlarni o'chirish."""
+    conn = _conn()
+    conn.execute("DELETE FROM votes WHERE flags LIKE '%test%'")
     conn.commit()
     conn.close()
-    return n
