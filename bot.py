@@ -24,13 +24,16 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
-    KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+    KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo,
 )
+from aiohttp import web
 from dotenv import load_dotenv
 
 import checks
 import database as db
+import panel_core
 import sheets
+import webpanel
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -46,6 +49,13 @@ if not BOT_TOKEN:
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+# --- Veb panel sozlamalari ---
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+PORT = int(os.getenv("PORT", "8080"))
+_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+PUBLIC_URL = (os.getenv("PUBLIC_URL") or (f"https://{_domain}" if _domain else "")).rstrip("/")
+PANEL_SECRET = panel_core.make_secret(BOT_TOKEN, ADMIN_PASSWORD) if ADMIN_PASSWORD else None
 
 
 class VotingFlow(StatesGroup):
@@ -100,6 +110,7 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"⚠️ Tekshirish kerak ({review_n})", callback_data="adm_review")],
         [InlineKeyboardButton(text="🔍 Raqam bo'yicha qidirish", callback_data="adm_search")],
         [InlineKeyboardButton(text="📥 Excel yuklab olish", callback_data="adm_export")],
+        [InlineKeyboardButton(text="🖥 Veb panel", callback_data="adm_panel")],
         [InlineKeyboardButton(text="🗑 Test ma'lumotlarini tozalash", callback_data="adm_clear")],
     ])
 
@@ -131,6 +142,27 @@ async def cmd_royxat(message: Message):
 async def cmd_export(message: Message):
     if is_admin(message.from_user.id):
         await send_excel(message)
+
+
+@dp.message(Command("panel"))
+async def cmd_panel(message: Message):
+    if is_admin(message.from_user.id):
+        await send_panel_link(message)
+
+
+async def send_panel_link(message: Message):
+    if not PANEL_SECRET:
+        await message.answer("Veb panel yoqilmagan: Railway Variables'ga ADMIN_PASSWORD qo'shing.")
+        return
+    if not PUBLIC_URL:
+        await message.answer("Veb panel manzili yo'q: Railway'da Settings -> Networking -> Generate Domain ni bosing.")
+        return
+    url = f"{PUBLIC_URL}/auth?t={panel_core.sign(PANEL_SECRET, 'magic', 600)}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Telegram ichida ochish", web_app=WebAppInfo(url=url))],
+        [InlineKeyboardButton(text="🌐 Brauzerda ochish", url=url)],
+    ])
+    await message.answer("Admin panel (havola 10 daqiqa amal qiladi):", reply_markup=kb)
 
 
 async def send_excel(message: Message):
@@ -176,6 +208,8 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Qidirish uchun raqamning bir qismini yozing (masalan 901234567):")
     elif action == "adm_export":
         await send_excel(callback.message)
+    elif action == "adm_panel":
+        await send_panel_link(callback.message)
     elif action == "adm_clear":
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✅ Ha, hammasini o'chir", callback_data="adm_clear_yes"),
@@ -341,6 +375,11 @@ async def wrong_content(message: Message):
 
 async def main():
     db.init_db()
+    if PANEL_SECRET:
+        runner = web.AppRunner(webpanel.build_app(bot, PANEL_SECRET, ADMIN_PASSWORD))
+        await runner.setup()
+        await web.TCPSite(runner, "0.0.0.0", PORT).start()
+        logging.info("Veb panel %s portda ishga tushdi", PORT)
     await dp.start_polling(bot)
 
 
