@@ -209,6 +209,61 @@ def search_by_phone(query: str) -> list:
     return _rows_to_tuples(rows)
 
 
+# ── bot.py bilan moslik uchun alias funksiyalar ──────────────────────────────
+
+def exists_for_phone(phone: str) -> bool:
+    """bot.py ichida ishlatiladi: db.exists_for_phone()"""
+    return phone_exists(phone)
+
+
+def exists_screenshot(unique_id: str) -> bool:
+    """bot.py ichida ishlatiladi: db.exists_screenshot()"""
+    return unique_id_exists(unique_id)
+
+
+def count_for_user(telegram_id: int) -> int:
+    """bot.py ichida ishlatiladi: db.count_for_user()"""
+    return count_per_tg(telegram_id)
+
+
+def get_vote(vote_id: int):
+    """bot.py ichida ishlatiladi: db.get_vote(vote_id)"""
+    return get_by_id(vote_id)
+
+
+def find_by_phone(query: str) -> list:
+    """bot.py ichida ishlatiladi: db.find_by_phone()"""
+    return search_by_phone(query)
+
+
+def clear_all() -> int:
+    """Barcha yozuvlarni o'chirish. bot.py: db.clear_all()"""
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM votes")
+    conn.commit()
+    deleted = cur.rowcount
+    conn.close()
+    return deleted
+
+
+def get_by_status(status: str, limit: int = None) -> list:
+    """bot.py: db.get_by_status('review', 10) — ixtiyoriy limit bilan."""
+    conn = _conn()
+    if limit:
+        rows = conn.execute(
+            "SELECT * FROM votes WHERE status=? ORDER BY id DESC LIMIT ?",
+            (status, limit)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM votes WHERE status=? ORDER BY id DESC",
+            (status,)
+        ).fetchall()
+    conn.close()
+    return _rows_to_tuples(rows)
+
+
 # ── Boshqaruv ────────────────────────────────────────────────────────────────
 
 def delete_test_data():
