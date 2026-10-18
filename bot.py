@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
@@ -26,14 +27,32 @@ from aiogram.types import (
     CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo,
 )
-from aiohttp import web
 from dotenv import load_dotenv
 
 import checks
 import database as db
-import panel_core
-import sheets
-import webpanel
+
+db.DB_PATH = os.getenv("DB_PATH", db.DB_PATH)  # Railway Volume uchun: /data/votes.db
+
+# Ixtiyoriy qismlar: yo'q bo'lsa ham bot asosiy ishini davom ettiradi (/diag sabab ko'rsatadi)
+IMPORT_ERRORS = {}
+try:
+    import sheets
+except Exception as e:
+    sheets = None
+    IMPORT_ERRORS["sheets"] = repr(e)
+try:
+    import panel_core
+    import webpanel
+    from aiohttp import web
+except Exception as e:
+    panel_core = webpanel = web = None
+    IMPORT_ERRORS["panel"] = repr(e)
+try:
+    import diag
+except Exception as e:
+    diag = None
+    IMPORT_ERRORS["diag"] = repr(e)
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -55,7 +74,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 PORT = int(os.getenv("PORT", "8080"))
 _domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
 PUBLIC_URL = (os.getenv("PUBLIC_URL") or (f"https://{_domain}" if _domain else "")).rstrip("/")
-PANEL_SECRET = panel_core.make_secret(BOT_TOKEN, ADMIN_PASSWORD) if ADMIN_PASSWORD else None
+PANEL_SECRET = panel_core.make_secret(BOT_TOKEN, ADMIN_PASSWORD) if (ADMIN_PASSWORD and panel_core) else None
 
 
 class VotingFlow(StatesGroup):
@@ -144,6 +163,29 @@ async def cmd_export(message: Message):
         await send_excel(message)
 
 
+@dp.message(Command("diag"))
+async def cmd_diag(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip() == "sheets":
+        if not sheets:
+            await message.answer(f"❌ sheets.py yuklanmagan: {IMPORT_ERRORS.get('sheets')}")
+            return
+        ok, info = await asyncio.to_thread(
+            sheets.send_row, 0, 0, "DIAG TEST", "+998000000000", "test", datetime.now().isoformat(), "diag"
+        )
+        await message.answer(
+            "✅ Sheet'ga 'DIAG TEST' qatori yozildi. Jadvalni tekshirib, qatorni o'chirib qo'ying."
+            if ok else f"❌ Sheet'ga yozilmadi: {info}"
+        )
+        return
+    if not diag:
+        await message.answer(f"❌ diag.py GitHub'da yo'q yoki xato: {IMPORT_ERRORS.get('diag')}")
+        return
+    await message.answer(await asyncio.to_thread(diag.build_report, PUBLIC_URL, bool(PANEL_SECRET), IMPORT_ERRORS))
+
+
 @dp.message(Command("panel"))
 async def cmd_panel(message: Message):
     if is_admin(message.from_user.id):
@@ -151,6 +193,9 @@ async def cmd_panel(message: Message):
 
 
 async def send_panel_link(message: Message):
+    if not panel_core or not webpanel:
+        await message.answer("Veb panel fayllari (panel_core.py, webpanel.py) GitHub'da yo'q. /diag ni yuboring.")
+        return
     if not PANEL_SECRET:
         await message.answer("Veb panel yoqilmagan: Railway Variables'ga ADMIN_PASSWORD qo'shing.")
         return
@@ -216,7 +261,7 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext):
             InlineKeyboardButton(text="❌ Bekor qilish", callback_data="adm_clear_no"),
         ]])
         await callback.message.answer(
-            f"Diqqat! Bazadagi {len(db.get_all())} ta yozuv butunlay o'chiriladi. Davom etamizmi?",
+            f"Diqqat! Bazadagi {len(db.get_all(limit=1000000))} ta yozuv butunlay o'chiriladi. Davom etamizmi?",
             reply_markup=kb,
         )
     elif action == "adm_clear_yes":
@@ -352,9 +397,10 @@ async def get_screenshot(message: Message, state: FSMContext):
         await message.answer("Rahmat! Skrinshotingiz qabul qilindi va ro'yxatga qo'shildi. ✅")
 
     row = db.get_vote(vote_id)
-    asyncio.create_task(asyncio.to_thread(
-        sheets.append_row, vote_id, message.from_user.id, full_name, phone, status, row[6], flags
-    ))
+    if sheets:
+        asyncio.create_task(asyncio.to_thread(
+            sheets.append_row, vote_id, message.from_user.id, full_name, phone, status, row[6], flags
+        ))
 
     try:
         if review:
@@ -374,12 +420,28 @@ async def wrong_content(message: Message):
 
 
 async def main():
+    os.makedirs(os.path.dirname(os.path.abspath(db.DB_PATH)), exist_ok=True)
     db.init_db()
-    if PANEL_SECRET:
-        runner = web.AppRunner(webpanel.build_app(bot, PANEL_SECRET, ADMIN_PASSWORD))
-        await runner.setup()
-        await web.TCPSite(runner, "0.0.0.0", PORT).start()
-        logging.info("Veb panel %s portda ishga tushdi", PORT)
+    if PANEL_SECRET and webpanel and web:
+        try:
+            runner = web.AppRunner(webpanel.build_app(bot, PANEL_SECRET, ADMIN_PASSWORD))
+            await runner.setup()
+            await web.TCPSite(runner, "0.0.0.0", PORT).start()
+            logging.info("Veb panel %s portda ishga tushdi", PORT)
+        except Exception as e:
+            IMPORT_ERRORS["panel_start"] = repr(e)
+            logging.error("Veb panel ishga tushmadi: %s", e)
+    try:
+        persistent = os.path.ismount(os.path.dirname(os.path.abspath(db.DB_PATH)))
+        issues = len(IMPORT_ERRORS)
+        await bot.send_message(
+            ADMIN_ID,
+            f"✅ Bot ishga tushdi. Yozuvlar: {len(db.get_all(limit=1000000))}. "
+            f"Baza: {'doimiy' if persistent else 'VAQTINCHALIK'}. "
+            f"Muammolar: {issues}. Batafsil: /diag",
+        )
+    except Exception as e:
+        logging.warning("Ishga tushish xabari yuborilmadi: %s", e)
     await dp.start_polling(bot)
 
 
