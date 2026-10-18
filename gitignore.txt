@@ -1,0 +1,5 @@
+.env
+*.zip
+votes.db
+__pycache__/
+royxat.xlsx
